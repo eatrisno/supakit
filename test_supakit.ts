@@ -1,4 +1,4 @@
-import { supakit } from "./index.ts";
+import { supakit } from "./supakit.ts";
 import { z } from "./deps.ts";
 
 // Define a simple GET route
