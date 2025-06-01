@@ -104,6 +104,11 @@ function makeBase(basePath: string) {
   };
 }
 
+/**
+ * Starts the Supakit server with the defined routes.
+ * @example
+ * supakit.serve();
+ */
 export const supakit = {
   base(basePath: string) {
     return makeBase(basePath);
