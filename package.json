@@ -1,0 +1,15 @@
+{
+  "name": "supakit",
+  "version": "1.0.0",
+  "description": "A lightweight, typed `serve()` wrapper for Supabase Edge Functions with:  - ✅ Built-in CORS - ✅ Zod-powered validation (headers, body, query, response) - ✅ Clean handler format - ✅ Multipart file support",
+  "main": "index.js",
+  "scripts": {
+    "dev": "deno run --watch --allow-net --allow-read test_supakit.ts",
+    "start": "deno run --allow-net --allow-read test_supakit.ts",
+    "test": "deno test"
+
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC"
+}

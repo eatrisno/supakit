@@ -1,23 +1,6 @@
 import { serve as denoServe } from 'https://deno.land/std@0.177.0/http/server.ts';
 import { z, ZodSchema, ZodTypeAny } from "https://deno.land/x/zod@v3.21.4/mod.ts";
 
-// Helper for multipart parsing
-async function parseMultipartFormData(req: Request) {
-  const contentType = req.headers.get('content-type') || '';
-  if (!contentType.startsWith('multipart/form-data')) return null;
-  const formData = await req.formData();
-  const fields: Record<string, string> = {};
-  const files: { field: string, file: File }[] = [];
-  for (const [key, value] of formData.entries()) {
-    if (typeof value === 'string') {
-      fields[key] = value;
-    } else if (value instanceof File) {
-      files.push({ field: key, file: value });
-    }
-  }
-  return { fields, files, formData };
-}
-
 type HandlerResponse = {
   success: boolean;
   data?: any;
@@ -104,11 +87,17 @@ function makeBase(basePath: string) {
   };
 }
 
-/**
- * Starts the Supakit server with the defined routes.
- * @example
- * supakit.serve();
- */
+function replaceUndefinedWithEmpty(obj: any): any {
+  if (Array.isArray(obj)) {
+    return obj.map(replaceUndefinedWithEmpty);
+  } else if (obj && typeof obj === "object") {
+    return Object.fromEntries(
+      Object.entries(obj).map(([k, v]) => [k, v === undefined ? "" : replaceUndefinedWithEmpty(v)])
+    );
+  }
+  return obj;
+}
+
 export const supakit = {
   base(basePath: string) {
     return makeBase(basePath);
@@ -160,49 +149,37 @@ export const supakit = {
         }
 
         // Parse body (JSON or multipart)
-        let body: any = undefined;
-        let files: { field: string, file: File }[] | undefined = undefined;
-        let fields: Record<string, string> | undefined = undefined;
-        let formData: FormData | undefined = undefined;
+        let body: any = {};
+        let formData: FormData = new FormData();
+
         const contentType = req.headers.get('content-type') || '';
-        if (contentType.startsWith('multipart/form-data')) {
-          const parsed = await parseMultipartFormData(req);
-          if (parsed) {
-            files = parsed.files;
-            fields = parsed.fields;
-            formData = parsed.formData;
-          }
-        } else if (route.bodySchema) {
-          try {
+        if (contentType.startsWith("multipart/form-data")) {
+            formData = await req.formData();
+        }else {
             body = await req.json();
-          } catch {
-            return errorResponse('Invalid or missing JSON body', 400);
-          }
-          const result = route.bodySchema.safeParse(body);
-          if (!result.success) {
-            return errorResponse('Invalid request body', 400, result.error.issues);
-          }
-          body = result.data;
         }
 
-        // Call handler
-        const handlerResult = await route.handler(req, { params, headers, body, files, fields, formData });
-
-        // Hono-like response handling
-        if (handlerResult instanceof Response) {
-          return handlerResult;
+        if (route.bodySchema) {
+            const result = route.bodySchema.safeParse(body);
+            if (!result.success) {
+              return errorResponse('Invalid request body', 400, result.error.issues);
+            }
+            body = result.data;
         }
+        const handlerResult = await route.handler(req, { params, headers, body, formData });
+        const safeResult = replaceUndefinedWithEmpty(handlerResult);
+
         let status = 200;
         let resHeaders: Record<string, string> = { 'Content-Type': 'application/json', ...corsHeaders() };
-        let resBody: any = handlerResult;
+        let resBody: any = safeResult;
         if (
-          handlerResult &&
-          typeof handlerResult === 'object' &&
-          ('status' in handlerResult || 'body' in handlerResult || 'headers' in handlerResult)
+          safeResult &&
+          typeof safeResult === 'object' &&
+          ('status' in safeResult || 'body' in safeResult || 'headers' in safeResult)
         ) {
-          status = handlerResult.status ?? 200;
-          resHeaders = { ...resHeaders, ...(handlerResult.headers ?? {}) };
-          resBody = 'body' in handlerResult ? handlerResult.body : handlerResult.data ?? handlerResult.body;
+          status = safeResult.status ?? 200;
+          resHeaders = { ...resHeaders, ...(safeResult.headers ?? {}) };
+          resBody = 'body' in safeResult ? safeResult.body : safeResult.data ?? safeResult.body;
         }
         // Response validation
         if (route.responseSchema && resBody !== undefined) {
