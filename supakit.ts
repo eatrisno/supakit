@@ -1,5 +1,5 @@
 import { serve as denoServe } from 'https://deno.land/std@0.177.0/http/server.ts';
-import { z, ZodSchema, ZodTypeAny } from "https://deno.land/x/zod@v3.21.4/mod.ts";
+import { z, ZodTypeAny } from "https://deno.land/x/zod@v3.21.4/mod.ts";
 
 type HandlerResponse = {
   success: boolean;
@@ -21,6 +21,7 @@ type RouteDefinition<
   bodySchema?: TBody;
   querySchema?: TQuery;
   responseSchema?: TResponse;
+  middlewares?: MiddlewareFunction[];
 };
 
 type Infer<T extends ZodTypeAny | undefined> = T extends ZodTypeAny ? z.infer<T> : unknown;
@@ -49,6 +50,13 @@ type HandlerFunction<
     }
 >;
 
+// Middleware type
+type MiddlewareFunction = (
+  req: Request,
+  extras: any,
+  next: () => Promise<any>
+) => Promise<any>;
+
 // --- Fluent API ---
 const routes: RouteDefinition[] = [];
 
@@ -63,28 +71,31 @@ function addRoute(method: string, path: string, opts: any) {
 
 function makeBase(basePath: string) {
   const prefix = basePath.startsWith('/') ? basePath : '/' + basePath;
+  const middlewares: MiddlewareFunction[] = [];
+
   function withBasePath(path: string) {
     if (path === '' || path === '/') return prefix;
     return prefix + (path.startsWith('/') ? path : '/' + path);
   }
-  return {
-    get(path: string, opts: any) {
-      addRoute('GET', withBasePath(path), opts);
-      return this;
-    },
-    post(path: string, opts: any) {
-      addRoute('POST', withBasePath(path), opts);
-      return this;
-    },
-    put(path: string, opts: any) {
-      addRoute('PUT', withBasePath(path), opts);
-      return this;
-    },
-    delete(path: string, opts: any) {
-      addRoute('DELETE', withBasePath(path), opts);
-      return this;
-    },
+
+  function use(mw: MiddlewareFunction) {
+    middlewares.push(mw);
+    return baseApi;
+  }
+
+  function add(method: string, path: string, opts: any) {
+    addRoute(method, withBasePath(path), { ...opts, middlewares: [...middlewares] });
+    return baseApi;
+  }
+
+  const baseApi = {
+    use,
+    get: (path: string, opts: any) => add('GET', path, opts),
+    post: (path: string, opts: any) => add('POST', path, opts),
+    put: (path: string, opts: any) => add('PUT', path, opts),
+    delete: (path: string, opts: any) => add('DELETE', path, opts),
   };
+  return baseApi;
 }
 
 function replaceUndefinedWithEmpty(obj: any): any {
@@ -166,7 +177,24 @@ export const supakit = {
             }
             body = result.data;
         }
-        const handlerResult = await route.handler(req, { params, headers, body, formData });
+
+        // Compose middleware and handler
+        const middlewares = route.middlewares || [];
+        const handler = route.handler;
+        let idx = -1;
+        async function dispatch(i: number): Promise<any> {
+          idx = i;
+          if (i < middlewares.length) {
+            const result = await middlewares[i](req, { params, headers, body, formData }, () => dispatch(i + 1));
+            if (result instanceof Response) return result;
+            return result;
+          }
+          const result = await handler(req, { params, headers, body, formData });
+          if (result instanceof Response) return result;
+          return result;
+        }
+        const handlerResult = await dispatch(0);
+        if (handlerResult instanceof Response) return handlerResult;
         const safeResult = replaceUndefinedWithEmpty(handlerResult);
 
         let status = 200;
