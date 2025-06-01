@@ -1,1 +1,1 @@
-export * from "./supakit.ts"
+export * from "./index.ts"
