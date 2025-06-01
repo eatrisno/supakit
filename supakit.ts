@@ -90,6 +90,17 @@ function makeBase(basePath: string) {
 
   const baseApi = {
     use,
+    base: function(subPath: string) {
+      const newBasePath = withBasePath(subPath);
+      const newBase = makeBase(newBasePath);
+      for (const mw of middlewares) {
+        newBase.use(mw);
+      }
+      return newBase;
+    },
+    group: function(subPath: string) {
+      return this.base(subPath);
+    },
     get: (path: string, opts: any) => add('GET', path, opts),
     post: (path: string, opts: any) => add('POST', path, opts),
     put: (path: string, opts: any) => add('PUT', path, opts),
