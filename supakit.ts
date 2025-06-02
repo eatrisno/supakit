@@ -25,7 +25,7 @@ export type SupakitContext = {
  * Handler function signature for supakit routes.
  * @param ctx The context object, with formData, validatedBody, validatedQuery, validatedHeaders, and params.
  */
-export type HandlerFunction = (ctx: SupakitContext) => Promise<any>;
+export type HandlerFunction = (req: Request) => Promise<any>;
 
 /**
  * Middleware function signature for supakit.
@@ -148,6 +148,11 @@ export class Supakit {
 
   serve() {
     const routes = this.getRoot().routes;
+    // Debug: print all registered routes
+    console.log("[Supakit] Registered routes:");
+    for (const r of routes) {
+      console.log(`  [${(r.methods || []).join(",")}] ${r.path}`);
+    }
     return denoServe(async (req: Request) => {
       try {
         const corsResponse = handleCors(req);
@@ -180,32 +185,25 @@ export class Supakit {
 
           if (!route) return errorResponse("Not Found", 404);
 
-          let formData: FormData | undefined = await parseFormData(req);
-          let validatedQuery, validatedHeaders, validatedBody;
-          try {
-            ({ validatedQuery, validatedHeaders, validatedBody, formData } = await validateRequest(
-              req,
-              {
-                querySchema: route.querySchema,
-                headersSchema: route.headersSchema,
-                bodySchema: route.bodySchema,
-              },
-              formData
-            ));
-          } catch (e) {
-            if (e.type === "query") return errorResponse("Invalid query", 400, e.issues);
-            if (e.type === "headers") return errorResponse("Invalid headers", 400, e.issues);
-            if (e.type === "body") return errorResponse("Invalid body", 400, e.issues);
-            throw e;
+          if (route.querySchema || route.headersSchema || route.bodySchema) {
+            try {
+              await validateRequest(
+                req,
+                {
+                  querySchema: route.querySchema,
+                  headersSchema: route.headersSchema,
+                  bodySchema: route.bodySchema,
+                }
+              );
+            } catch (e) {
+              if (e.type === "query") return errorResponse("Invalid query", 400, e.issues);
+              if (e.type === "headers") return errorResponse("Invalid headers", 400, e.issues);
+              if (e.type === "body") return errorResponse("Invalid body", 400, e.issues);
+              throw e;
+            }
           }
-          const ctx: SupakitContext = {
-            formData,
-            validatedBody,
-            validatedQuery,
-            validatedHeaders,
-            params: {},
-          };
-          const result = await handler(ctx);
+          console.log("[Supakit] About to call handler for", req.url, "method:", req.method);
+          const result = await handler(req);
           if (result instanceof Response) return result;
           return result;
         }
@@ -349,10 +347,10 @@ async function validateRequest(
     querySchema?: z.ZodTypeAny;
     headersSchema?: z.ZodTypeAny;
     bodySchema?: z.ZodTypeAny;
-  },
-  formData?: FormData
+  }
 ) {
   let validatedQuery, validatedHeaders, validatedBody;
+  let formData;
   try {
     validatedQuery = parseAndValidateQuery(req, schemas.querySchema);
   } catch (e) {
@@ -366,7 +364,7 @@ async function validateRequest(
     throw e;
   }
   try {
-    const bodyResult = await parseAndValidateBody(req, schemas.bodySchema, formData);
+    const bodyResult = await parseAndValidateBody(req, schemas.bodySchema);
     validatedBody = bodyResult.body;
     if (bodyResult.formData) formData = bodyResult.formData;
   } catch (e) {
