@@ -10,24 +10,27 @@ A lightweight, typed `serve()` wrapper for Supabase Edge Functions with:
 ## Usage
 
 ```ts
-import { serve } from "https://deno.land/x/supakit@v1.0.0/mod.ts";
+import { Supakit } from "https://deno.land/x/supakit@v1.0.0/mod.ts";
 import { z } from "https://deno.land/x/zod@v3.21.4/mod.ts";
 
 const bodySchema = z.object({ name: z.string() });
 
-serve(async (req, { body }) => {
-  return { data: { message: `Hello, ${body.name}` } };
-}, {
-  methods: ['POST'],
+const api = new Supakit();
+api.post("/hello", {
   bodySchema,
+  handler: async (ctx) => {
+    return { data: { message: `Hello, ${ctx.validatedBody.name}` } };
+  },
 });
+
+api.serve();
 ```
 
 
 ```ts
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { z } from "https://deno.land/x/zod@v3.21.4/mod.ts";
-import { supakit } from "https://deno.land/x/supakit@v1.0.1/mod.ts";
+import { Supakit } from "https://deno.land/x/supakit@v1.0.1/mod.ts";
 
 const BodySchema = z.object({
   name: z.string(),
@@ -47,13 +50,13 @@ const supabase = createClient(
   Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
 );
 
-const base = supakit.base('hello_world');
+const base = new Supakit('hello_world');
 base.post('/upload', {
   headersSchema: HeadersSchema,
   querySchema: QuerySchema,
   bodySchema: BodySchema,
-  handler: async (req, { params, headers, body, formData }) => {
-    const file = formData.get('file');
+  handler: async (ctx) => {
+    const file = ctx.formData.get('file');
     let fileName = 'no file';
     let data = null;
     let error = null;
@@ -77,19 +80,19 @@ base.post('/upload', {
             fileName,
             data,
             error,
-            body,
-            params,
-            headers
+            body: ctx.validatedBody,
+            params: ctx.params,
+            headers: ctx.validatedHeaders
         }
     };
   }
 });
 
 base.get('/get-file', {
-  handler: async (req, { params, headers, body, formData }) => {
+  handler: async (ctx) => {
     const { data, error } = await supabase.storage
       .from('ulalo-dev')
-      .download(params.path);
+      .download(ctx.params.path);
 
     if (error || !data) {
       return {
@@ -109,11 +112,11 @@ base.get('/get-file', {
       status: 200,
       headers: {
         'Content-Type': contentType,
-        'Content-Disposition': `attachment; filename="${params.path}"`
+        'Content-Disposition': `attachment; filename="${ctx.params.path}"`
       }
     });
   }
 });
 
-supakit.serve();
+base.serve();
 ```

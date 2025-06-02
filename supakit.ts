@@ -46,57 +46,210 @@ type RouteDefinition = {
   middlewares?: MiddlewareFunction[];
 };
 
-const routes: RouteDefinition[] = [];
+export class Supakit {
+  static version = "1.0.5";
+  private basePath: string;
+  private routes: RouteDefinition[] = [];
+  private middlewares: MiddlewareFunction[] = [];
+  private parent?: Supakit;
 
-function addRoute(method: string, path: string, opts: any) {
-  // Support both direct function and object with handler
-  const routeDef = typeof opts === "function" ? { handler: opts } : opts;
-  routes.push({
-    path: path.startsWith("/") ? path : "/" + path,
-    methods: [method],
-    ...routeDef,
-  });
-  return supakit;
-}
-
-function makeBase(basePath: string) {
-  const prefix = basePath.startsWith("/") ? basePath : "/" + basePath;
-  const middlewares: MiddlewareFunction[] = [];
-
-  function withBasePath(path: string) {
-    if (path === "" || path === "/") return prefix;
-    return prefix + (path.startsWith("/") ? path : "/" + path);
+  constructor(basePath: string = "", parent?: Supakit) {
+    this.basePath = basePath.startsWith("/") ? basePath : basePath ? "/" + basePath : "";
+    this.parent = parent;
   }
 
-  function use(mw: MiddlewareFunction) {
-    middlewares.push(mw);
-    return baseApi;
+  private getRoot(): Supakit {
+    return this.parent ? this.parent.getRoot() : this;
   }
 
-  function add(method: string, path: string, opts: any) {
-    addRoute(method, withBasePath(path), { ...opts, middlewares: [...middlewares] });
-    return baseApi;
+  private getFullPath(path: string): string {
+    const base = this.basePath;
+    if (path === "" || path === "/") return base;
+    return base + (path.startsWith("/") ? path : "/" + path);
   }
 
-  const baseApi = {
-    use,
-    base: function (subPath: string) {
-      const newBasePath = withBasePath(subPath);
-      const newBase = makeBase(newBasePath);
-      for (const mw of middlewares) {
-        newBase.use(mw);
+  use(mw: MiddlewareFunction) {
+    this.middlewares.push(mw);
+    return this;
+  }
+
+  base(subPath: string) {
+    // Return a proxy that registers on the root, but with extended path and middleware
+    const newBasePath = this.getFullPath(subPath);
+    const parent = this.getRoot();
+    const inheritedMiddlewares = [...this.middlewares];
+    const proxy = {
+      use: (mw: MiddlewareFunction) => {
+        inheritedMiddlewares.push(mw);
+        return proxy;
+      },
+      base: (sub: string) => proxy.group(sub),
+      group: (sub: string) => {
+        const subBasePath = newBasePath + (sub.startsWith("/") ? sub : "/" + sub);
+        // Recursively create a new proxy for deeper nesting
+        return parent._makeProxy(subBasePath, [...inheritedMiddlewares]);
+      },
+      get: (path: string, opts: any) => parent._addWithProxy("GET", newBasePath, path, opts, inheritedMiddlewares),
+      post: (path: string, opts: any) => parent._addWithProxy("POST", newBasePath, path, opts, inheritedMiddlewares),
+      put: (path: string, opts: any) => parent._addWithProxy("PUT", newBasePath, path, opts, inheritedMiddlewares),
+      delete: (path: string, opts: any) => parent._addWithProxy("DELETE", newBasePath, path, opts, inheritedMiddlewares),
+    };
+    return proxy;
+  }
+
+  group(subPath: string) {
+    return this.base(subPath);
+  }
+
+  private _makeProxy(basePath: string, middlewares: MiddlewareFunction[]) {
+    const parent = this.getRoot();
+    const proxy = {
+      use: (mw: MiddlewareFunction) => {
+        middlewares.push(mw);
+        return proxy;
+      },
+      base: (sub: string) => proxy.group(sub),
+      group: (sub: string) => {
+        const subBasePath = basePath + (sub.startsWith("/") ? sub : "/" + sub);
+        return parent._makeProxy(subBasePath, [...middlewares]);
+      },
+      get: (path: string, opts: any) => parent._addWithProxy("GET", basePath, path, opts, middlewares),
+      post: (path: string, opts: any) => parent._addWithProxy("POST", basePath, path, opts, middlewares),
+      put: (path: string, opts: any) => parent._addWithProxy("PUT", basePath, path, opts, middlewares),
+      delete: (path: string, opts: any) => parent._addWithProxy("DELETE", basePath, path, opts, middlewares),
+    };
+    return proxy;
+  }
+
+  private _addWithProxy(method: string, basePath: string, path: string, opts: any, middlewares: MiddlewareFunction[]) {
+    const fullPath = basePath + (path.startsWith("/") ? path : "/" + path);
+    const routeDef = typeof opts === "function" ? { handler: opts } : opts;
+    this.getRoot().routes.push({
+      path: fullPath,
+      methods: [method],
+      ...routeDef,
+      middlewares: [...(routeDef.middlewares || []), ...middlewares],
+    });
+    return this;
+  }
+
+  get(path: string, opts: any) {
+    return this._addWithProxy("GET", this.basePath, path, opts, this.middlewares);
+  }
+  post(path: string, opts: any) {
+    return this._addWithProxy("POST", this.basePath, path, opts, this.middlewares);
+  }
+  put(path: string, opts: any) {
+    return this._addWithProxy("PUT", this.basePath, path, opts, this.middlewares);
+  }
+  delete(path: string, opts: any) {
+    return this._addWithProxy("DELETE", this.basePath, path, opts, this.middlewares);
+  }
+
+  serve() {
+    const routes = this.getRoot().routes;
+    return denoServe(async (req: Request) => {
+      try {
+        const corsResponse = handleCors(req);
+        if (corsResponse) return corsResponse;
+
+        const url = new URL(req.url);
+        const pathname = url.pathname;
+        const method = req.method;
+
+        const route = routes.find((r) => {
+          if (r.path !== pathname) return false;
+          if (r.methods && !r.methods.includes(method)) return false;
+          return true;
+        });
+
+        if (!route) {
+          return errorResponse("Not Found", 404);
+        }
+
+        const middlewares = route.middlewares || [];
+        const handler = route.handler;
+        let idx = -1;
+        async function dispatch(i: number): Promise<any> {
+          idx = i;
+          if (i < middlewares.length) {
+            const result = await middlewares[i](req, () => dispatch(i + 1));
+            if (result instanceof Response) return result;
+            return result;
+          }
+
+          if (!route) return errorResponse("Not Found", 404);
+
+          let formData: FormData | undefined = await parseFormData(req);
+          let validatedQuery, validatedHeaders, validatedBody;
+          try {
+            ({ validatedQuery, validatedHeaders, validatedBody, formData } = await validateRequest(
+              req,
+              {
+                querySchema: route.querySchema,
+                headersSchema: route.headersSchema,
+                bodySchema: route.bodySchema,
+              },
+              formData
+            ));
+          } catch (e) {
+            if (e.type === "query") return errorResponse("Invalid query", 400, e.issues);
+            if (e.type === "headers") return errorResponse("Invalid headers", 400, e.issues);
+            if (e.type === "body") return errorResponse("Invalid body", 400, e.issues);
+            throw e;
+          }
+          const ctx: SupakitContext = {
+            formData,
+            validatedBody,
+            validatedQuery,
+            validatedHeaders,
+            params: {},
+          };
+          const result = await handler(ctx);
+          if (result instanceof Response) return result;
+          return result;
+        }
+        const handlerResult = await dispatch(0);
+        if (handlerResult instanceof Response) return handlerResult;
+        const safeResult = replaceUndefinedWithEmpty(handlerResult);
+
+        let status = 200;
+        let resHeaders: Record<string, string> = { "Content-Type": "application/json", ...corsHeaders() };
+        let resBody: any = safeResult;
+        if (
+          safeResult &&
+          typeof safeResult === "object" &&
+          ("status" in safeResult || "body" in safeResult || "headers" in safeResult)
+        ) {
+          status = safeResult.status ?? 200;
+          resHeaders = { ...resHeaders, ...(safeResult.headers ?? {}) };
+          resBody = "body" in safeResult ? safeResult.body : safeResult.data ?? safeResult.body;
+        }
+        if (route.responseSchema && resBody !== undefined) {
+          const result = route.responseSchema.safeParse(resBody);
+          if (!result.success) {
+            return errorResponse("Invalid response data", 500, result.error.issues);
+          }
+          resBody = result.data;
+        }
+        return new Response(
+          typeof resBody === "string" ? resBody : JSON.stringify(resBody, null, 2),
+          {
+            status,
+            headers: resHeaders,
+          }
+        );
+      } catch (err: any) {
+        return errorResponse(err?.message || "Internal server error", 500);
       }
-      return newBase;
-    },
-    group: function (subPath: string) {
-      return this.base(subPath);
-    },
-    get: (path: string, opts: any) => add("GET", path, opts),
-    post: (path: string, opts: any) => add("POST", path, opts),
-    put: (path: string, opts: any) => add("PUT", path, opts),
-    delete: (path: string, opts: any) => add("DELETE", path, opts),
-  };
-  return baseApi;
+    });
+  }
+
+  static getFormFileName(formData: FormData | undefined, field: string): string | null {
+    if (!formData) return null;
+    const file = formData.get(field);
+    return file instanceof File ? file.name : null;
+  }
 }
 
 /**
@@ -170,54 +323,6 @@ async function parseAndValidateBody(req: Request, schema?: z.ZodTypeAny, formDat
 /**
  * Utility to always parse formData if content-type is multipart/form-data.
  */
-async function attachFormDataIfNeeded(req: Request) {
-  const contentType = req.headers.get("content-type") || "";
-  if (contentType.includes("multipart/form-data")) {
-    try {
-      return await req.formData();
-    } catch {
-      return undefined;
-    }
-  }
-  return undefined;
-}
-
-function replaceUndefinedWithEmpty(obj: any): any {
-  if (Array.isArray(obj)) {
-    return obj.map(replaceUndefinedWithEmpty);
-  } else if (obj && typeof obj === "object") {
-    return Object.fromEntries(
-      Object.entries(obj).map(([k, v]) => [k, v === undefined ? "" : replaceUndefinedWithEmpty(v)])
-    );
-  }
-  return obj;
-}
-
-/**
- * Utility to safely get a file name from a FormData field.
- * @param formData The FormData object
- * @param field The field name
- * @returns The file name if the field is a File, otherwise null
- */
-function getFormFileName(formData: FormData | undefined, field: string): string | null {
-  if (!formData) return null;
-  const file = formData.get(field);
-  return file instanceof File ? file.name : null;
-}
-
-/**
- * Handle CORS preflight and headers.
- */
-function handleCors(req: Request): Response | undefined {
-  if (req.method === "OPTIONS") {
-    return new Response(null, { status: 204, headers: corsHeaders() });
-  }
-  return undefined;
-}
-
-/**
- * Parse formData once for multipart/form-data POST/PUT requests.
- */
 async function parseFormData(req: Request): Promise<FormData | undefined> {
   const contentType = req.headers.get("content-type") || "";
   if (
@@ -271,118 +376,26 @@ async function validateRequest(
   return { validatedQuery, validatedHeaders, validatedBody, formData };
 }
 
-export const supakit = {
-  version: SUPAKIT_VERSION,
-  base(basePath: string) {
-    return makeBase(basePath);
-  },
-  serve() {
-    return denoServe(async (req: Request) => {
-      try {
-        // CORS preflight
-        const corsResponse = handleCors(req);
-        if (corsResponse) return corsResponse;
+function replaceUndefinedWithEmpty(obj: any): any {
+  if (Array.isArray(obj)) {
+    return obj.map(replaceUndefinedWithEmpty);
+  } else if (obj && typeof obj === "object") {
+    return Object.fromEntries(
+      Object.entries(obj).map(([k, v]) => [k, v === undefined ? "" : replaceUndefinedWithEmpty(v)])
+    );
+  }
+  return obj;
+}
 
-        const url = new URL(req.url);
-        const pathname = url.pathname;
-        const method = req.method;
-
-        // Find matching route
-        const route = routes.find((r) => {
-          if (r.path !== pathname) return false;
-          if (r.methods && !r.methods.includes(method)) return false;
-          return true;
-        });
-
-        if (!route) {
-          return errorResponse("Not Found", 404);
-        }
-
-        // Compose middleware and handler
-        const middlewares = route.middlewares || [];
-        const handler = route.handler;
-        let idx = -1;
-        async function dispatch(i: number): Promise<any> {
-          idx = i;
-          if (i < middlewares.length) {
-            const result = await middlewares[i](req, () => dispatch(i + 1));
-            if (result instanceof Response) return result;
-            return result;
-          }
-
-          // Ensure route is defined before proceeding
-          if (!route) return errorResponse("Not Found", 404);
-
-          // Parse formData once
-          let formData: FormData | undefined = await parseFormData(req);
-          // Validate and get all validated data
-          let validatedQuery, validatedHeaders, validatedBody;
-          try {
-            ({ validatedQuery, validatedHeaders, validatedBody, formData } = await validateRequest(
-              req,
-              {
-                querySchema: route.querySchema,
-                headersSchema: route.headersSchema,
-                bodySchema: route.bodySchema,
-              },
-              formData
-            ));
-          } catch (e) {
-            if (e.type === "query") return errorResponse("Invalid query", 400, e.issues);
-            if (e.type === "headers") return errorResponse("Invalid headers", 400, e.issues);
-            if (e.type === "body") return errorResponse("Invalid body", 400, e.issues);
-            throw e;
-          }
-          // Build the context object for the handler
-          const ctx: SupakitContext = {
-            formData,
-            validatedBody,
-            validatedQuery,
-            validatedHeaders,
-            params: {},
-          };
-          const result = await handler(ctx);
-          if (result instanceof Response) return result;
-          return result;
-        }
-        const handlerResult = await dispatch(0);
-        if (handlerResult instanceof Response) return handlerResult;
-        const safeResult = replaceUndefinedWithEmpty(handlerResult);
-
-        let status = 200;
-        let resHeaders: Record<string, string> = { "Content-Type": "application/json", ...corsHeaders() };
-        let resBody: any = safeResult;
-        if (
-          safeResult &&
-          typeof safeResult === "object" &&
-          ("status" in safeResult || "body" in safeResult || "headers" in safeResult)
-        ) {
-          status = safeResult.status ?? 200;
-          resHeaders = { ...resHeaders, ...(safeResult.headers ?? {}) };
-          resBody = "body" in safeResult ? safeResult.body : safeResult.data ?? safeResult.body;
-        }
-        // Response validation
-        if (route.responseSchema && resBody !== undefined) {
-          const result = route.responseSchema.safeParse(resBody);
-          if (!result.success) {
-            return errorResponse("Invalid response data", 500, result.error.issues);
-          }
-          resBody = result.data;
-        }
-        return new Response(
-          typeof resBody === "string" ? resBody : JSON.stringify(resBody, null, 2),
-          {
-            status,
-            headers: resHeaders,
-          }
-        );
-      } catch (err: any) {
-        return errorResponse(err?.message || "Internal server error", 500);
-      }
-    });
-  },
-  getFormFileName,
-};
+/**
+ * Handle CORS preflight and headers.
+ */
+function handleCors(req: Request): Response | undefined {
+  if (req.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: corsHeaders() });
+  }
+  return undefined;
+}
 
 function corsHeaders() {
   return {

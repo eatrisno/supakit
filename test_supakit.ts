@@ -1,7 +1,7 @@
 import { z } from "./deps.ts";
-import { supakit } from "./supakit.ts";
+import { Supakit } from "./supakit.ts";
 // Define a simple GET route
-const main = supakit.base("/api")
+const main = new Supakit("/api");
 main.use(async (req, next) => {
     if (req.headers.get("authorization") !== "Bearer 1234567890") {
       return new Response(JSON.stringify({message: "Unauthorized"}), { status: 401 });
@@ -15,7 +15,7 @@ const BodySchema = z.object({
   name: z.string(),
 });
 
-const test = main.group("/test")
+const test = main.group("/test");
 test.post("/upload", {
     headersSchema: z.object({
         "x-client-info": z.string(),
@@ -46,4 +46,4 @@ test.post("/upload", {
 });
 
 // Start the server
-supakit.serve();
+main.serve();
